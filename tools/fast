@@ -1,0 +1,556 @@
+import os
+import tqdm
+from concurrent.futures import ThreadPoolExecutor
+import struct
+import yaml
+import shutil
+
+# 将16进制字符串转换为字节
+def hex_string_to_bytes(hex_string):
+    return bytes.fromhex(hex_string)
+
+# 将10进制数字转换为4个字节的16进制
+def decimal_to_4byte_hex(decimal_value):
+    return decimal_value.to_bytes(4, byteorder='little')
+
+# 定义要查找的标记和目标字节
+def get_markers(start_marker_input, end_marker_input, target_marker_decimal):
+    start_marker = hex_string_to_bytes(start_marker_input)  # 例如 '33f2' -> b'\x33\xf2'
+    end_marker = hex_string_to_bytes(end_marker_input)  # 例如 '25f2' -> b'\x25\xf2'
+    target_marker = decimal_to_4byte_hex(target_marker_decimal)  # 10进制转换为字节
+    return start_marker, end_marker, target_marker
+
+# 在文件中查找符合条件的块
+def find_blocks_in_file(content, file_path, found_blocks, start_marker, end_marker, target_marker):
+    idx_start = 0
+    while idx_start < len(content):
+        # 查找起始标记
+        start_idx = content.find(start_marker, idx_start)
+        if start_idx == -1:
+            break  # 没有找到起始标记
+        
+        # 查找结束标记
+        end_idx = content.find(end_marker, start_idx + len(start_marker))
+        if end_idx == -1:
+            break  # 没有找到结束标记
+        
+        # 检查起始标记和结束标记之间是否有14个字节
+        if end_idx - (start_idx + len(start_marker)) == 14:
+            # 目标字节查找：查找第一个目标字节
+            target_start_idx = end_idx + len(end_marker) + 15  # 从结束标记后15个字节开始
+            first_target_value = content[target_start_idx:target_start_idx + 4]
+            block_start = target_start_idx + 4  # 记录目标字节后的位置
+            
+            # 找到第二个目标字节
+            second_target_idx = content.find(first_target_value, block_start)
+            if second_target_idx != -1:
+                # 记录块的目标字节和其位置
+                found_blocks.append({
+                    'file': file_path,
+                    'first_target_value': first_target_value.hex(),
+                    'first_target_position': target_start_idx,
+                    'second_target_value': first_target_value.hex(),
+                    'second_target_position': second_target_idx
+                })
+        
+        # 继续查找下一个块
+        idx_start = end_idx + len(end_marker)
+
+def find_blocks_in_file_vehicle(content, file_path, found_blocks, start_marker, end_marker, target_marker):
+    idx_start = 0
+
+    while idx_start < len(content):
+        # 查找起始标记
+        start_idx = content.find(start_marker, idx_start)
+        if start_idx == -1:
+            break  # 没有找到起始标记
+        
+        # 查找结束标记
+        end_idx = content.find(end_marker, start_idx + len(start_marker))
+        if end_idx == -1:
+            break  # 没有找到结束标记
+        
+        # 检查起始标记和结束标记之间是否有14个字节
+        if end_idx - (start_idx + len(start_marker)) == 14:
+            # 目标字节查找：查找第一个目标字节
+            target_start_idx = end_idx + len(end_marker) + 15  # 从结束标记后15个字节开始
+            first_target_value = content[target_start_idx:target_start_idx + 4]
+            block_start = target_start_idx + 4  # 记录目标字节后的位置
+
+            # 🚀 调用 little_endian_append_00 处理数据
+            second_target_value = little_endian_append_00(first_target_value)
+            if second_target_value is None:
+                #print(f"跳过无效数据，文件: {file_path}, 位置: {target_start_idx}")
+                idx_start = end_idx + len(end_marker)  # 继续寻找下一个 block
+                continue  # 跳过本次循环，避免报错
+            
+            # 找到第二个目标字节
+            second_target_idx = content.find(second_target_value, block_start)
+            if second_target_idx != -1:
+                # 记录块的目标字节和其位置
+                found_blocks.append({
+                    'file': file_path,
+                    'first_target_value': first_target_value.hex(),
+                    'first_target_position': target_start_idx,
+                    'second_target_value': second_target_value.hex(),
+                    'second_target_position': second_target_idx
+                })
+        
+        # 继续查找下一个块
+        idx_start = end_idx + len(end_marker)
+
+
+def little_endian_append_00(byte_data):
+    """
+    1. 将小端模式的字节数据转换为 10 进制整数
+    2. 在后面拼接 "00"（相当于乘 100，但不会溢出）
+    3. 转换回小端模式的字节数据（bytes）
+    """
+    # 1️⃣ 确保数据至少 4 字节
+    if len(byte_data) < 4:
+        #print(f"错误：数据 {byte_data} 长度不足 4 字节，跳过！")
+        return None
+
+    # 2️⃣ 解析小端 16 进制为整数
+    decimal_value = struct.unpack('<I', byte_data)[0]
+
+    # 3️⃣ 将整数转换为字符串，并在后面加 "00"，然后转换回整数
+    new_decimal_value = int(str(decimal_value) + "00")  
+
+    # 4️⃣ 确保新值不超过 4 字节最大值（0xFFFFFFFF = 4294967295）
+    if new_decimal_value > 0xFFFFFFFF:
+        #print(f"错误：计算结果 {new_decimal_value} 超出 4 字节范围，跳过！")
+        return None
+
+    # 5️⃣ 转换回小端模式的字节数据
+    new_little_endian_bytes = struct.pack('<I', new_decimal_value)
+
+    return new_little_endian_bytes  # 保持 bytes 类型
+
+import struct
+
+def little_endian_remove_00(byte_data):
+    """
+    1. 将小端模式的字节数据转换为 10 进制整数
+    2. 去掉末尾的 "00"
+    3. 转换回小端模式的字节数据（bytes）
+    """
+    # 1️⃣ 确保数据至少 4 字节
+    if len(byte_data) < 4:
+        return None
+
+    # 2️⃣ 解析小端 16 进制为整数
+    decimal_value = struct.unpack('<I', byte_data)[0]
+
+    # 3️⃣ 去掉末尾的 "00"
+    new_decimal_value = decimal_value // 100  
+
+    # 4️⃣ 确保新值不超过 4 字节最大值（0xFFFFFFFF = 4294967295）
+    if new_decimal_value > 0xFFFFFFFF:
+        return None
+
+    # 5️⃣ 转换回小端模式的字节数据
+    new_little_endian_bytes = struct.pack('<I', new_decimal_value)
+
+    return new_little_endian_bytes
+
+
+# 遍历文件夹中的文件
+def process_file(file_path, start_marker, end_marker, target_marker, found_blocks, found_blocks_no_symmetric):
+    try:
+        # 打开文件并以二进制模式读取其内容
+        with open(file_path, 'rb') as f:
+            content = f.read()
+            # 查找标记
+            find_blocks_in_file(content, file_path, found_blocks, start_marker, end_marker, target_marker)
+            find_blocks_in_file_vehicle(content, file_path, found_blocks_no_symmetric, start_marker, end_marker, target_marker)
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+
+# 遍历文件夹中的文件
+def find_hex_blocks_in_folder(folder_path, start_marker, end_marker, target_marker):
+    # 存储找到的块
+    found_blocks = []
+    found_blocks_no_symmetric = []
+    
+    # 遍历文件夹中的所有文件，使用 tqdm 显示进度条
+    files = []
+    for root, dirs, files_in_dir in os.walk(folder_path):
+        files.extend([os.path.join(root, file) for file in files_in_dir])
+
+    with ThreadPoolExecutor() as executor:
+        # 使用线程池并行处理文件
+        list(tqdm.tqdm(executor.map(lambda file: process_file(file, start_marker, end_marker, target_marker, found_blocks, found_blocks_no_symmetric), files), desc="Processing files", unit="file"))
+        
+    return found_blocks, found_blocks_no_symmetric
+
+def int_to_hex_little_endian(n):
+    # 使用 struct.pack 将整数按小端模式转换为字节
+    byte_data = struct.pack('<I', n)  # '<'表示小端模式，'I'表示无符号整数
+    # 将字节数据转换为16进制格式
+    hex_data = byte_data.hex()
+    return hex_data
+
+def readyaml(file_path):
+    # 解析 YAML 文件
+    with open(file_path, 'r', encoding='utf-8') as file:
+        data = yaml.safe_load(file)
+
+    # 提取 swap_pairs
+    swap_pairs = data.get('swap_pairs', [])
+
+    # 提取 hex_markers
+    hex_markers = data.get('hex_markers', {})
+
+    # 提取 start 和 end 标记
+    start_marker = hex_markers.get('start', '')
+    end_marker = hex_markers.get('end', '')
+    return swap_pairs, start_marker, end_marker
+
+def swap_hex_values_in_file(file1, pos1, pos2, file2, pos3, pos4, value1, value2):
+    """
+    在 file1 和 file2 的指定位置交换 value1 和 value2，并复制修改后的文件到 '交换过/uexp' 目录
+    """
+
+    global modified_files
+    # 确保文件存在
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        print(f"错误: 文件 {file1} 或 {file2} 不存在！")
+        return
+    
+    # 读取 file1
+    with open(file1, 'rb') as f:
+        content1 = bytearray(f.read())  # 读取文件内容为可修改的字节数组
+    
+    # 读取 file2
+    with open(file2, 'rb') as f:
+        content2 = bytearray(f.read())
+
+    # 解析 16 进制值为字节格式
+    bytes_value1 = bytes.fromhex(value1)
+    bytes_value2 = bytes.fromhex(value2)
+
+    # 交换内容
+    modified = False
+    if file1 == file2:
+        if content1[pos1:pos1+len(bytes_value1)] == bytes_value1 and content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+            content1[pos1:pos1+len(bytes_value1)] = bytes_value2
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content1[pos3:pos3+len(bytes_value2)] == bytes_value2 and content1[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            content1[pos3:pos3+len(bytes_value2)] = bytes_value1
+            content1[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True
+    else:
+        if content1[pos1:pos1+len(bytes_value1)] == bytes_value1 and content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+            content1[pos1:pos1+len(bytes_value1)] = bytes_value2
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content2[pos3:pos3+len(bytes_value2)] == bytes_value2 and content2[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            content2[pos3:pos3+len(bytes_value2)] = bytes_value1
+            content2[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True        
+
+    # 如果发生了修改，写回文件
+    if modified:
+        if file1 == file2:
+            with open(file1, 'wb') as f:
+                f.write(content1)
+        else:
+            with open(file1, 'wb') as f:
+                f.write(content1)
+            with open(file2, 'wb') as f:
+                f.write(content2)
+
+        # # 复制文件到 "交换过/uexp" 目录
+        # shutil.copy2(file1, os.path.join(output_folder, os.path.basename(file1)))
+        # shutil.copy2(file2, os.path.join(output_folder, os.path.basename(file2)))
+        # 记录已修改的文件
+        modified_files.add(file1)
+        modified_files.add(file2)
+
+
+        #print(f"成功交换 {file1} 和 {file2} 的数据，并已复制到 {output_folder}")
+def swap_hex_values_in_file_vehicle(file1, pos1, pos2, file2, pos3, pos4, value1, value2):
+    """
+    在 file1 和 file2 的指定位置交换 value1 和 value2，并复制修改后的文件到 '交换过/uexp' 目录
+    """
+    global modified_files
+    # 确保文件存在
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        print(f"错误: 文件 {file1} 或 {file2} 不存在！")
+        return
+    
+    # 读取 file1
+    with open(file1, 'rb') as f:
+        content1 = bytearray(f.read())  # 读取文件内容为可修改的字节数组
+    
+    # 读取 file2
+    with open(file2, 'rb') as f:
+        content2 = bytearray(f.read())
+
+    # 解析 16 进制值为字节格式
+    bytes_value1 = bytes.fromhex(value1)
+    bytes_value2 = bytes.fromhex(value2)
+
+    # 交换内容
+    modified = False
+    if file1 == file2:
+        if content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+
+            #content1[pos1:pos1+len(bytes_value1)] = little_endian_remove_00(bytes_value2)
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content1[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            #content2[pos3:pos3+len(bytes_value2)] = little_endian_remove_00(bytes_value1)
+            content1[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True
+    else:
+        if content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+
+            #content1[pos1:pos1+len(bytes_value1)] = little_endian_remove_00(bytes_value2)
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content2[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            #content2[pos3:pos3+len(bytes_value2)] = little_endian_remove_00(bytes_value1)
+            content2[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True
+
+    # 如果发生了修改，写回文件
+    if modified:
+        if file1 == file2:
+                # print(content1[pos2:pos2+len(bytes_value1)], bytes_value1)
+            with open(file1, 'wb') as f:
+                f.write(content1)
+
+        else:
+            # print(content1[pos2:pos2+len(bytes_value1)], bytes_value1)
+            with open(file1, 'wb') as f:
+                f.write(content1)
+            with open(file2, 'wb') as f:
+                f.write(content2)
+
+        # # 复制文件到 "交换过/uexp" 目录
+        # shutil.copy2(file1, os.path.join(output_folder, os.path.basename(file1)))
+        # shutil.copy2(file2, os.path.join(output_folder, os.path.basename(file2)))
+
+        # print(f"成功交换 {file1} 和 {file2} 的数据，并已复制到 {output_folder}")
+        modified_files.add(file1)
+        modified_files.add(file2)
+
+
+def swap_hex_values_in_file_weapon(file1, pos1, pos2, file2, pos3, pos4, value1, value2):
+
+    """
+    在 file1 和 file2 的指定位置交换 value1 和 value2，并复制修改后的文件到 '交换过/uexp' 目录
+    """
+    global modified_files
+    #确保文件存在
+    if not os.path.exists(file1) or not os.path.exists(file2):
+        print(f"错误: 文件 {file1} 或 {file2} 不存在！")
+        return
+    
+    # 读取 file1
+    with open(file1, 'rb') as f:
+        content1 = bytearray(f.read())  # 读取文件内容为可修改的字节数组
+    
+    # 读取 file2
+    with open(file2, 'rb') as f:
+        content2 = bytearray(f.read())
+
+    # 解析 16 进制值为字节格式
+    bytes_value1 = bytes.fromhex(value1)
+    bytes_value2 = bytes.fromhex(value2)
+
+    # 交换内容
+    modified = False
+    if file1 == file2:
+
+        if content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content1[pos3:pos3+len(bytes_value2)] == bytes_value2 and content1[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            content1[pos3:pos3+len(bytes_value2)] = bytes_value1
+            content1[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True
+    else:
+        if content1[pos2:pos2+len(bytes_value1)] == bytes_value1:
+            content1[pos2:pos2+len(bytes_value1)] = bytes_value2
+            modified = True
+
+        if content2[pos3:pos3+len(bytes_value2)] == bytes_value2 and content2[pos4:pos4+len(bytes_value2)] == bytes_value2:
+            content2[pos3:pos3+len(bytes_value2)] = bytes_value1
+            content2[pos4:pos4+len(bytes_value2)] = bytes_value1
+            modified = True
+    # 如果发生了修改，写回文件
+    if modified:
+        if file1 == file2:
+            with open(file1, 'wb') as f:
+                f.write(content1)
+        else:
+            with open(file1, 'wb') as f:
+                f.write(content1)
+            with open(file2, 'wb') as f:
+                f.write(content2)            
+        # # 复制文件到 "交换过/uexp" 目录
+        # shutil.copy2(file1, os.path.join(output_folder, os.path.basename(file1)))
+        # shutil.copy2(file2, os.path.join(output_folder, os.path.basename(file2)))
+
+        # print(f"成功交换 {file1} 和 {file2} 的数据，并已复制到 {output_folder}")
+        modified_files.add(file1)
+        modified_files.add(file2)
+
+def copy_modified_files(output_folder):
+    # 确保目标文件夹存在
+    os.makedirs(output_folder, exist_ok=True)
+
+    for file in modified_files:
+        shutil.copy2(file, os.path.join(output_folder, os.path.basename(file)))
+        print(f"已复制修改过的文件: {file} 到 {output_folder}")
+
+
+def delete_unmodified_files(directory, modified_files):
+    for file_name in os.listdir(directory):
+        file_path = os.path.join(directory, file_name)
+        if file_path not in modified_files and os.path.isfile(file_path):
+            os.remove(file_path)
+            # print(f"已删除未修改的文件: {file_path}")
+    print('美化完成，接下来请使用，uexp打包')
+
+def copy_uexp_files(source_folder, destination_folder):
+    """
+    清空目标文件夹，并将源文件夹中的所有文件复制到目标文件夹。
+
+    Args:
+        source_folder (str): 源文件夹路径。
+        destination_folder (str): 目标文件夹路径。
+    """
+    try:
+        # 清空目标文件夹
+        if os.path.exists(destination_folder):
+            shutil.rmtree(destination_folder)
+        os.makedirs(destination_folder)
+
+        # 复制所有文件
+        for filename in os.listdir(source_folder):
+            source_path = os.path.join(source_folder, filename)
+            destination_path = os.path.join(destination_folder, filename)
+            if os.path.isfile(source_path):#判断是否为文件，如果是文件，则进行复制
+                shutil.copy2(source_path, destination_path)
+            elif os.path.isdir(source_path):#判断是否为文件夹，如果是文件夹，则递归调用自身
+                shutil.copytree(source_path, destination_path)
+
+        # print("文件复制完成。")
+
+    except Exception as e:
+        print(f"发生错误：{e}")
+
+
+copy_uexp_files('解包数据/uexp', '打包/uexp')
+# 示例输入
+start_marker_input = ''  # 输入的16进制标记
+end_marker_input = ''  # 输入的16进制标记
+target_marker_decimal = 403211  # 输入的10进制数字
+
+file_path = '快速美化.yaml'
+file_path_vehicle = '载具配置.yaml'
+file_path_weapon = '枪械配置.yaml'
+first_block = []
+last_block = []
+
+cloth_to_swap, start_marker_input, end_marker_input = readyaml(file_path)
+vehicle_to_swap, _, _ = readyaml(file_path_vehicle)
+weapon_to_swap, _, _ = readyaml(file_path_weapon)
+modified_files = set()
+# 获取所有标记
+start_marker, end_marker, target_marker = get_markers(start_marker_input, end_marker_input, target_marker_decimal)
+
+# 运行程序并显示找到的块
+
+source_folder_path = '解包数据/uexp'
+folder_path = '打包/uexp'  # 设置文件夹路径
+found_blocks, found_blocks_no_symmetric = find_hex_blocks_in_folder(folder_path, start_marker, end_marker, target_marker)
+# print(len(found_blocks_no_symmetric))
+
+# 目标文件夹
+output_folder = '打包/uexp'
+os.makedirs(output_folder, exist_ok=True)
+
+
+
+#衣服
+# 预处理 found_blocks，创建字典索引，加速查找
+found_blocks_dict = {block['first_target_value']: block for block in found_blocks}
+found_blocks_no_symmetric_dict = {block['second_target_value']: block for block in found_blocks_no_symmetric}
+# print(len(found_blocks_no_symmetric_dict))
+
+cloth_to_swap_temp = []
+for pair in cloth_to_swap:
+    first_hex = int_to_hex_little_endian(pair[0])
+    last_hex = int_to_hex_little_endian(pair[1])
+
+    first_block = found_blocks_dict.get(first_hex)  # O(1) 查找
+    last_block = found_blocks_dict.get(last_hex)    # O(1) 查找
+
+    if first_block and last_block:  # 确保都找到了
+        cloth_to_swap_temp.append([first_block, last_block])
+
+# 批量执行文件交换，减少 I/O 开销
+for first_block, last_block in cloth_to_swap_temp:
+    swap_hex_values_in_file(
+        first_block['file'], first_block['first_target_position'], first_block['second_target_position'],
+        last_block['file'], last_block['first_target_position'], last_block['second_target_position'],
+        first_block['first_target_value'], last_block['first_target_value']
+    )
+
+
+#载具
+vehicle_to_swap_temp = []
+for pair in vehicle_to_swap:
+    first_hex = int_to_hex_little_endian(pair[0])
+    last_hex = int_to_hex_little_endian(pair[1])
+
+    first_block = found_blocks_no_symmetric_dict.get(first_hex)  # O(1) 查找
+    last_block = found_blocks_no_symmetric_dict.get(last_hex)    # O(1) 查找
+
+    if first_block and last_block:  # 确保都找到了
+        vehicle_to_swap_temp.append([first_block, last_block])
+#print(vehicle_to_swap_temp)
+# 批量执行文件交换，减少 I/O 开销
+for first_block, last_block in vehicle_to_swap_temp:
+    swap_hex_values_in_file_vehicle(
+        first_block['file'], first_block['first_target_position'], first_block['second_target_position'],
+        last_block['file'], last_block['first_target_position'], last_block['second_target_position'],
+        first_block['second_target_value'], last_block['second_target_value']
+    )
+
+
+#武器
+weapon_to_swap_temp = []
+for pair in weapon_to_swap:
+    first_hex = int_to_hex_little_endian(pair[0])
+    last_hex = int_to_hex_little_endian(pair[1])
+
+    first_block = found_blocks_no_symmetric_dict.get(first_hex)  # O(1) 查找
+    last_block = found_blocks_dict.get(last_hex)    # O(1) 查找
+
+    if first_block and last_block:  # 确保都找到了
+
+        weapon_to_swap_temp.append([first_block, last_block])
+
+# 批量执行文件交换，减少 I/O 开销
+for first_block, last_block in weapon_to_swap_temp:
+    swap_hex_values_in_file_weapon(
+        first_block['file'], first_block['first_target_position'], first_block['second_target_position'],
+        last_block['file'], last_block['first_target_position'], last_block['second_target_position'],
+        first_block['second_target_value'], last_block['first_target_value']
+    )
+
+
+# copy_modified_files(output_folder)
+delete_unmodified_files(output_folder, modified_files)
